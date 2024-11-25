@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, silhouette_samples
 
 def perform_analysis(dataframes):
     st.title("Olympic Games Analysis System")
@@ -26,14 +27,28 @@ def perform_analysis(dataframes):
 def perform_simple_analysis(medals_df):
     st.header("Simple Clustering Analysis")
     
-    # Slider untuk jumlah cluster
-    n_clusters = st.slider("Number of Clusters", 2, 10, 5)
-    
     # Prepare data
+    country_medals = prepare_data(medals_df)
+    X_scaled = prepare_features(country_medals)
+    
+    # Silhouette Analysis
+    st.subheader("Clustering Evaluation using Silhouette Analysis")
+    optimal_k = perform_silhouette_analysis(X_scaled, country_medals)
+    
+    # User can still adjust number of clusters
+    n_clusters = st.slider("Select number of clusters", 2, 10, optimal_k, 
+                          help="Default value is the optimal number based on Silhouette analysis, but you can adjust it based on your needs")
+    
+    # Perform clustering with selected k
+    perform_clustering_analysis(X_scaled, country_medals, n_clusters)
+
+def prepare_data(medals_df):
+    # Calculate medal counts per country
     gold_counts = medals_df[medals_df['medal_type'] == 'GOLD'].groupby('country_name').size()
     silver_counts = medals_df[medals_df['medal_type'] == 'SILVER'].groupby('country_name').size()
     bronze_counts = medals_df[medals_df['medal_type'] == 'BRONZE'].groupby('country_name').size()
     
+    # Create DataFrame
     country_medals = pd.DataFrame({
         'gold_count': gold_counts,
         'silver_count': silver_counts,
@@ -41,18 +56,156 @@ def perform_simple_analysis(medals_df):
     }).fillna(0)
     
     country_medals['total_medals'] = country_medals.sum(axis=1)
-    country_medals = country_medals[country_medals['total_medals'] > 0]
-    
-    # Clustering
+    return country_medals[country_medals['total_medals'] > 0]
+
+def prepare_features(country_medals):
     features = ['gold_count', 'silver_count', 'bronze_count']
     X = country_medals[features]
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    return scaler.fit_transform(X)
+
+def perform_silhouette_analysis(X_scaled, country_medals):
+    # Calculate silhouette scores for different k
+    k_range = range(2, 11)
+    silhouette_scores = []
+    silhouette_data = []
     
+    for k in k_range:
+        kmeans = KMeans(n_clusters=k, random_state=42)
+        cluster_labels = kmeans.fit_predict(X_scaled)
+        silhouette_avg = silhouette_score(X_scaled, cluster_labels)
+        silhouette_scores.append(silhouette_avg)
+        
+        # Calculate silhouette scores for each sample
+        sample_silhouette_values = silhouette_samples(X_scaled, cluster_labels)
+        silhouette_data.append({
+            'k': k,
+            'avg_score': silhouette_avg,
+            'sample_values': sample_silhouette_values,
+            'labels': cluster_labels
+        })
+    
+    # Find optimal k
+    optimal_k = k_range[np.argmax(silhouette_scores)]
+    
+    # Display results in columns
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        # Plot silhouette scores
+        fig1 = plot_silhouette_scores(k_range, silhouette_scores, optimal_k)
+        st.plotly_chart(fig1)
+        
+        # Plot detailed silhouette for optimal k
+        fig2 = plot_detailed_silhouette(silhouette_data, optimal_k)
+        st.plotly_chart(fig2)
+    
+    with col2:
+        st.info(f"""
+        ### Optimal Clustering Results:
+        - Number of clusters: **{optimal_k}**
+        - Silhouette Score: **{max(silhouette_scores):.3f}**
+        """)
+        
+        show_silhouette_interpretation(max(silhouette_scores))
+        
+        # Show all scores in a table
+        st.write("### Silhouette Scores by K")
+        scores_df = pd.DataFrame({
+            'K': list(k_range),
+            'Silhouette Score': silhouette_scores
+        })
+        st.dataframe(scores_df.style.format({'Silhouette Score': '{:.3f}'})
+                    .background_gradient(subset=['Silhouette Score'], cmap='viridis'))
+    
+    return optimal_k
+
+def plot_silhouette_scores(k_range, scores, optimal_k):
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=list(k_range),
+        y=scores,
+        mode='lines+markers',
+        name='Silhouette Score',
+        line=dict(color='blue'),
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=[optimal_k],
+        y=[scores[optimal_k-2]],
+        mode='markers',
+        marker=dict(size=15, symbol='star', color='red'),
+        name=f'Optimal k={optimal_k}'
+    ))
+    
+    fig.update_layout(
+        title='Silhouette Scores by Number of Clusters',
+        xaxis_title='Number of Clusters (k)',
+        yaxis_title='Silhouette Score',
+        template='plotly_dark'
+    )
+    
+    return fig
+
+def plot_detailed_silhouette(silhouette_data, optimal_k):
+    optimal_data = next(data for data in silhouette_data if data['k'] == optimal_k)
+    
+    fig = go.Figure()
+    
+    y_lower = 0
+    for i in range(optimal_k):
+        cluster_values = optimal_data['sample_values'][optimal_data['labels'] == i]
+        cluster_values.sort()
+        
+        y_upper = y_lower + len(cluster_values)
+        
+        fig.add_trace(go.Scatter(
+            x=cluster_values,
+            y=np.linspace(y_lower, y_upper, len(cluster_values)),
+            mode='lines',
+            name=f'Cluster {i}',
+            showlegend=True
+        ))
+        
+        y_lower = y_upper + 10
+    
+    fig.update_layout(
+        title=f'Detailed Silhouette Plot for k={optimal_k}',
+        xaxis_title='Silhouette Coefficient',
+        yaxis_title='Cluster',
+        template='plotly_dark',
+        showlegend=True
+    )
+    
+    return fig
+
+def show_silhouette_interpretation(score):
+    st.write("### Interpretation of Silhouette Score")
+    st.write("""
+    The silhouette score ranges from -1 to 1:
+    - Score close to 1: Well-defined clusters
+    - Score close to 0: Overlapping clusters
+    - Score close to -1: Incorrect clustering
+    """)
+    
+    if score > 0.7:
+        st.success("Strong clustering structure found!")
+    elif score > 0.5:
+        st.info("Reasonable clustering structure detected")
+    elif score > 0.25:
+        st.warning("Weak clustering structure - consider different features or preprocessing")
+    else:
+        st.error("Poor clustering structure - data might not have clear clusters")
+
+def perform_clustering_analysis(X_scaled, country_medals, n_clusters):
+    st.header(f"Clustering Analysis with {n_clusters} clusters")
+    
+    # Perform clustering
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     country_medals['Cluster'] = kmeans.fit_predict(X_scaled)
     
-    # Visualisasi
+    # Create 3D visualization
     fig = px.scatter_3d(
         country_medals.reset_index(),
         x='gold_count',
@@ -60,16 +213,53 @@ def perform_simple_analysis(medals_df):
         z='bronze_count',
         color='Cluster',
         hover_data=['country_name', 'total_medals'],
-        title='Country Clusters based on Medal Performance',
+        title=f'Countries Clustered into {n_clusters} Groups',
         labels={
             'gold_count': 'Gold Medals',
             'silver_count': 'Silver Medals',
             'bronze_count': 'Bronze Medals'
         }
     )
+    
     st.plotly_chart(fig)
     
-    # Analisis cluster
+    # Cluster characteristics visualization
+    cluster_means = country_medals.groupby('Cluster')[['gold_count', 'silver_count', 'bronze_count']].mean()
+    
+    fig2 = go.Figure()
+    
+    fig2.add_trace(go.Bar(
+        name='Gold',
+        x=cluster_means.index,
+        y=cluster_means['gold_count'],
+        marker_color='gold',
+    ))
+    
+    fig2.add_trace(go.Bar(
+        name='Silver',
+        x=cluster_means.index,
+        y=cluster_means['silver_count'],
+        marker_color='silver',
+    ))
+    
+    fig2.add_trace(go.Bar(
+        name='Bronze',
+        x=cluster_means.index,
+        y=cluster_means['bronze_count'],
+        marker_color='#cd7f32',
+    ))
+    
+    fig2.update_layout(
+        title='Average Medal Counts per Cluster',
+        xaxis_title='Cluster',
+        yaxis_title='Average Number of Medals',
+        barmode='group',
+        template='plotly_dark'
+    )
+    
+    st.plotly_chart(fig2)
+    
+    # Display cluster analysis
     for i in range(n_clusters):
         cluster_data = country_medals[country_medals['Cluster'] == i]
         st.subheader(f"Cluster {i} Analysis")
@@ -88,53 +278,6 @@ def perform_simple_analysis(medals_df):
             st.write(f"Number of Countries: {len(cluster_data)}")
             st.write(f"Average Total Medals: {cluster_data['total_medals'].mean():.2f}")
             st.write(f"Average Gold Medals: {cluster_data['gold_count'].mean():.2f}")
-    
-    # Tambahan visualisasi karakteristik cluster
-    st.subheader("Cluster Characteristics")
-    
-    # Hitung rata-rata medali per cluster
-    cluster_means = country_medals.groupby('Cluster')[['gold_count', 'silver_count', 'bronze_count']].mean()
-    
-    # Buat visualisasi karakteristik cluster
-    fig = go.Figure()
-    
-    # Tambahkan bar untuk setiap jenis medali
-    fig.add_trace(go.Bar(
-        name='Gold',
-        x=cluster_means.index,
-        y=cluster_means['gold_count'],
-        text=cluster_means['gold_count'].round(1),
-        textposition='auto',
-        marker_color='gold',
-    ))
-    
-    fig.add_trace(go.Bar(
-        name='Silver',
-        x=cluster_means.index,
-        y=cluster_means['silver_count'],
-        text=cluster_means['silver_count'].round(1),
-        textposition='auto',
-        marker_color='silver',
-    ))
-    
-    fig.add_trace(go.Bar(
-        name='Bronze',
-        x=cluster_means.index,
-        y=cluster_means['bronze_count'],
-        text=cluster_means['bronze_count'].round(1),
-        textposition='auto',
-        marker_color='#cd7f32',
-    ))
-    
-    fig.update_layout(
-        barmode='group',
-        title='Average Medal Counts per Cluster',
-        xaxis_title='Cluster',
-        yaxis_title='Average Number of Medals',
-        template='plotly_dark'  # Menggunakan tema gelap seperti pada gambar
-    )
-    
-    st.plotly_chart(fig)
 
 def perform_detailed_analysis(medals_df):
     st.header("Detailed Performance Analysis")
